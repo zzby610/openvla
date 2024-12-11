@@ -571,7 +571,7 @@ python experiments/robot/libero/run_libero_eval.py \
 ```
 
 Notes:
-* The evaluation script will run 500 trials by default (10 tasks x 500 episodes each). You can modify the number of
+* The evaluation script will run 500 trials by default (10 tasks x 50 episodes each). You can modify the number of
   trials per task by setting `--num_trials_per_task`. You can also change the random seed via `--seed`.
 * **NOTE: Setting `--center_crop True` is important** because we fine-tuned OpenVLA with random crop augmentations
   (we took a random crop with 90% area in every training sample, so at test time we simply take the center 90% crop).
