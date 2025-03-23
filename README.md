@@ -491,7 +491,6 @@ moviepy version to an older version, v1.0.3, in the bridge_data_robot repo's req
 [here](https://github.com/rail-berkeley/bridge_data_robot/blob/main/widowx_envs/requirements.txt). I.e., simply replace `moviepy`
 with `moviepy==1.0.3` in the requirements.txt file. Then, go back to the first step above and restart the WidowX Docker container;
 it should be rebuilt with the older moviepy version.
-```
 
 
 ### LIBERO Simulation Benchmark Evaluations
