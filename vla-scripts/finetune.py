@@ -124,7 +124,7 @@ class FinetuneConfig:
 
     # Tracking Parameters
     wandb_project: str = "magma"                                  # Name of W&B project to log to (use default!)
-    wandb_entity: str = "stanford-voltron"                          # Name of entity to log under
+    wandb_entity: str = "zbyblanche610"                          # Name of entity to log under
     run_id_note: Optional[str] = None                               # Extra note for logging, Weights & Biases
 
     # fmt: on
