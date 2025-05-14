@@ -22,6 +22,8 @@ from prismatic.vla.action_tokenizer import ActionTokenizer
 from prismatic.vla.datasets.rlds import make_interleaved_dataset, make_single_dataset
 from prismatic.vla.datasets.rlds.oxe import OXE_NAMED_MIXTURES, get_oxe_dataset_kwargs_and_weights
 from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
+from transformers.image_processing_utils import BatchFeature
+
 
 # HuggingFace Default / LLaMa-2 IGNORE_INDEX (for labels)
 IGNORE_INDEX = -100
@@ -35,36 +37,113 @@ class RLDSBatchTransform:
     prompt_builder_fn: Type[PromptBuilder]
     predict_stop_token: bool = True
 
+    # def __call__(self, rlds_batch: Dict[str, Any]) -> Dict[str, Any]:
+    #     """Converts a RLDS batch to the format expected by the OpenVLA collator/models."""
+    #     dataset_name, action = rlds_batch["dataset_name"], rlds_batch["action"][0]
+    #     img = Image.fromarray(rlds_batch["observation"]["image_primary"][0])
+    #     lang = rlds_batch["task"]["language_instruction"].decode().lower()
+
+    #     # Construct Chat-based Prompt =>> Input is default query + language instruction, output are the action tokens
+    #     prompt_builder = self.prompt_builder_fn("openvla")
+    #     conversation = [
+    #         {"from": "human", "value": f"What action should the robot take to {lang}?"},
+    #         {"from": "gpt", "value": self.action_tokenizer(action)},
+    #     ]
+    #     for turn in conversation:
+    #         prompt_builder.add_turn(turn["from"], turn["value"])
+
+    #     # Tokenize (w/ `base_tokenizer`)
+    #     input_ids = self.base_tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
+    #     labels = list(input_ids)
+
+    #     # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
+    #     #   =>> IMPORTANT :: IF WE'RE USING HF LLM.forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
+    #     input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
+    #     pixel_values = self.image_transform(img)
+
+    #     # [CRITICAL] We do not want to take the loss for anything but the predicted action tokens!
+    #     labels[: -(len(action) + 1)] = IGNORE_INDEX
+    #     if not self.predict_stop_token:
+    #         labels[-1] = IGNORE_INDEX
+
+    #     return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels, dataset_name=dataset_name)
     def __call__(self, rlds_batch: Dict[str, Any]) -> Dict[str, Any]:
-        """Converts a RLDS batch to the format expected by the OpenVLA collator/models."""
         dataset_name, action = rlds_batch["dataset_name"], rlds_batch["action"][0]
         img = Image.fromarray(rlds_batch["observation"]["image_primary"][0])
         lang = rlds_batch["task"]["language_instruction"].decode().lower()
 
-        # Construct Chat-based Prompt =>> Input is default query + language instruction, output are the action tokens
-        prompt_builder = self.prompt_builder_fn("openvla")
-        conversation = [
-            {"from": "human", "value": f"What action should the robot take to {lang}?"},
-            {"from": "gpt", "value": self.action_tokenizer(action)},
-        ]
-        for turn in conversation:
-            prompt_builder.add_turn(turn["from"], turn["value"])
+        image_token = "<image>"
+        if image_token not in self.base_tokenizer.get_vocab():
+            self.base_tokenizer.add_tokens([image_token])
 
-        # Tokenize (w/ `base_tokenizer`)
-        input_ids = self.base_tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
-        labels = list(input_ids)
+        prompt = f"<image>\nIn: What action should the robot take to {lang}?\nOut: {self.action_tokenizer(action)}"
 
-        # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
-        #   =>> IMPORTANT :: IF WE'RE USING HF LLM.forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
+        # 构造 vocab 尾部 ID 映射
+        action_token_id_map = {f"<action_{i}>": self.base_tokenizer.vocab_size - 1 - i for i in range(self.action_tokenizer.vocab_size)}
+
+        # 拆分为前缀 + action tokens
+        prompt_prefix = f"<image>\nIn: What action should the robot take to {lang}?\nOut: "
+        action_tokens = self.action_tokenizer(action)  # 应该返回 ["<action_12>", "<action_44>", ...]
+
+        # 编码前缀
+        prefix_input_ids = self.base_tokenizer(prompt_prefix, add_special_tokens=True).input_ids
+
+        # 替换 action token 用固定映射
+        action_token_ids = [action_token_id_map[t] for t in action_tokens]
+
+        # 拼接 input_ids 和 labels
+        input_ids = prefix_input_ids + action_token_ids
+        labels = input_ids.copy()
+
+        # input_ids = self.base_tokenizer(prompt, add_special_tokens=True).input_ids
+        image_token_id = self.base_tokenizer.convert_tokens_to_ids("<image>")
+        # print("[DEBUG] input_ids:", input_ids)
+        # print("image token count in input_ids:", input_ids.count(image_token_id))
+        # print("DEBUG action_tokenizer output:", self.action_tokenizer(action))
+
+
+        # prompt = prompt_builder.get_prompt()
+        # input_ids = self.base_tokenizer(prompt, add_special_tokens=True).input_ids
+        # labels = list(input_ids)
+
+        # Convert to tensors
         input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
         pixel_values = self.image_transform(img)
+        pixel_values = self.image_transform(img).to(torch.bfloat16)
+        decoded_labels = self.base_tokenizer.batch_decode(labels[labels != -100].unsqueeze(0), skip_special_tokens=False)
+        # print("Decoded target tokens:", decoded_labels)
 
-        # [CRITICAL] We do not want to take the loss for anything but the predicted action tokens!
+
+        # Compute image_sizes
+        if isinstance(pixel_values, BatchFeature):
+            pixel_tensor = pixel_values["pixel_values"]
+        else:
+            pixel_tensor = pixel_values
+        h, w = pixel_tensor.shape[-2:]
+        patch_size = 32
+        image_size = (h // patch_size, w // patch_size)
+        image_sizes = [torch.tensor(image_size)]
+
+        # Mask loss
         labels[: -(len(action) + 1)] = IGNORE_INDEX
         if not self.predict_stop_token:
             labels[-1] = IGNORE_INDEX
 
-        return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels, dataset_name=dataset_name)
+        # Debug
+        # print("[DEBUG] prompt:", prompt)
+        # print("[DEBUG] <image> token id:", self.base_tokenizer.convert_tokens_to_ids(image_token))
+        # print("[DEBUG] input_ids:", input_ids.tolist())
+        # print("image token count in input_ids:", (input_ids == 128257).sum())
+
+
+        return dict(
+            pixel_values=pixel_values,
+            input_ids=input_ids,
+            labels=labels,
+            dataset_name=dataset_name,
+            image_sizes=image_sizes,
+        )
+
 
 
 class RLDSDataset(IterableDataset):

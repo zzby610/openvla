@@ -35,16 +35,40 @@ class ActionTokenizer:
         #   =>> Assumes we're always overwriting the final `n_bins` tokens of the vocabulary!
         self.action_token_begin_idx: int = int(self.tokenizer.vocab_size - (self.n_bins + 1))
 
+        # self.action_token_begin_idx: int = len(tokenizer) - self.n_bins
+        # self.action_token_end_idx: int = len(tokenizer) - 1
+
+        # self.action_token_begin_idx = 128000  #？
+        #[128000-256,128000]or[128000,128000+256]?
+
+
     def __call__(self, action: np.ndarray) -> Union[str, List[str]]:
         """Clip & bin actions to *the last `n_bins` tokens* of the vocabulary (e.g., tokenizer.vocab[-256:])."""
         action = np.clip(action, a_min=float(self.min_action), a_max=float(self.max_action))
         discretized_action = np.digitize(action, self.bins)
 
+        # token_ids = self.action_token_begin_idx + (discretized_action - 1)
+
+        # if len(token_ids.shape) == 1:
+        #     return self.tokenizer.decode(token_ids.tolist())
+        # else:
+        #     return self.tokenizer.batch_decode(token_ids.tolist())
+
         # Handle single element vs. batch
-        if len(discretized_action.shape) == 1:
-            return self.tokenizer.decode(list(self.tokenizer.vocab_size - discretized_action))
+        # if len(discretized_action.shape) == 1:
+        #     return self.tokenizer.decode(list(self.tokenizer.vocab_size - discretized_action))
+        # else:
+        #     return self.tokenizer.batch_decode((self.tokenizer.vocab_size - discretized_action).tolist())
+        
+            # Subtract 1 to make bin index start from 0
+
+        action_indices = (discretized_action - 1).clip(0, self.n_bins - 1)
+
+        if action_indices.ndim == 1:
+            return [f"<action_{i}>" for i in action_indices]
         else:
-            return self.tokenizer.batch_decode((self.tokenizer.vocab_size - discretized_action).tolist())
+            return [[f"<action_{i}>" for i in row] for row in action_indices]
+        
 
     def decode_token_ids_to_actions(self, action_token_ids: np.ndarray) -> np.ndarray:
         """
@@ -66,6 +90,21 @@ class ActionTokenizer:
         discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
 
         return self.bin_centers[discretized_actions]
+    
+
+    # def decode_token_ids_to_actions(self, action_token_ids: np.ndarray) -> np.ndarray:
+    #     action_token_ids = np.asarray(action_token_ids)
+    #     flat_ids = action_token_ids.flatten()
+    #     decoded = np.full(flat_ids.shape, fill_value=np.nan, dtype=np.float32)
+
+    #     valid = (flat_ids >= self.action_token_begin_idx) & (flat_ids <= self.action_token_end_idx)
+    #     bin_idx = flat_ids[valid] - self.action_token_begin_idx
+    #     bin_idx = np.clip(bin_idx, 0, self.bin_centers.shape[0] - 1)
+    #     decoded[valid] = self.bin_centers[bin_idx]
+
+    #     return decoded.reshape(action_token_ids.shape)
+
+        
 
     @property
     def vocab_size(self) -> int:

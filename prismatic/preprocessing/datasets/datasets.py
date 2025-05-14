@@ -86,7 +86,19 @@ class AlignDataset(Dataset[Dict[str, torch.Tensor]]):
         # Process Image --> get "pixel_values" (will either be a torch.Tensor OR a Dict[str,torch.Tensor])
         pixel_values = self.image_transform(Image.open(self.image_dir / image_path).convert("RGB"))
 
-        return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels)
+        # Assume that pixel_values is a Tensor: [C, H, W]
+            # We simulate 'image_sizes' as (height_in_patches, width_in_patches)
+
+        h, w = pixel_values.shape[-2:]  # pixel_values: (C, H, W)
+
+            # Divide by patch size to get (number of patches) -- patch size usually 32 for ConvNeXt
+        patch_size = 32
+        image_size = (h // patch_size, w // patch_size)
+
+        image_sizes = [torch.tensor(image_size)]
+        return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels, image_sizes=image_sizes)
+
+        # return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels)
 
     def get_modality_lengths(self, n_image_patches: int) -> List[Tuple[bool, int]]:
         """Get a list of modalities (unimodal / text-only vs. multimodal) and length of conversations per example."""
@@ -116,76 +128,145 @@ class FinetuneDataset(Dataset[Dict[str, torch.Tensor]]):
         self.prompt_builder_fn = prompt_builder_fn
         self.dataset_type = "finetune"
 
+
+        # print(f"[DEBUG] Loading instruct JSON from: {self.instruct_json}")
         # Load Instruct JSON
         with open(self.instruct_json, "r") as f:
             self.examples = json.load(f)
 
     # === Unimodal + Multimodal Handling ===
+    # def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    #     """
+    #     Unlike the *align* stage handling, for the *finetune* stage, we actually need to handle multiple "turns" of
+    #     dialog grounded in a single image.
+
+    #     To do this, we leverage the `prompt_builder_fn` which instantiates a PromptBuilder object. By calling the
+    #     methods for adding turns and getting a prompt, we ensure proper formatting and consistency for each example.
+
+    #     :param idx: Index to retrieve from the dataset.
+
+    #     :return: Dictionary of {"pixel_values": torch.Tensor, "input_ids": torch.Tensor, "labels": torch.Tensor}
+    #     """
+    #     conversation = self.examples[idx]["conversations"]
+
+    #     # Create Prompt Builder --> add each message sequentially
+    #     prompt_builder, input_ids, labels = self.prompt_builder_fn(model_family="prismatic"), [], []
+    #     for turn_idx, turn in enumerate(conversation):
+    #         # Get "effective" string added to prompt --> handle whitespace for tokenizer type!
+    #         msg = prompt_builder.add_turn(turn["from"], turn["value"])
+
+    #         # Llama Tokenizer (Fast) adds extra character if a string ends in whitespace --> strip if non-empty!
+    #         if isinstance(self.tokenizer, LlamaTokenizerFast):
+    #             msg = msg.rstrip()
+
+    #         # Phi-2 Tokenizer == CodeGenTokenizer (Fast) -- no special handling!
+    #         elif isinstance(self.tokenizer, CodeGenTokenizerFast):
+    #             pass
+
+    #         else:
+    #             raise ValueError(f"Tokenizer of type `{type(self.tokenizer)}` is not explicitly handled!")
+
+    #         # Tokenize Input IDs
+    #         turn_input_ids = self.tokenizer(msg, add_special_tokens=turn_idx == 0).input_ids
+
+    #         # [CRITICAL] We do not want to take the loss for the "USER: <msg>" prompts =>> just the responses!
+    #         turn_labels = (
+    #             [IGNORE_INDEX for _ in range(len(turn_input_ids))] if (turn_idx % 2) == 0 else list(turn_input_ids)
+    #         )
+
+    #         # Add to Trackers
+    #         input_ids.extend(turn_input_ids)
+    #         labels.extend(turn_labels)
+
+    #     # Tensorize =>> Set the <BOS> token's label to IGNORE_INDEX (since we're inserting the image patches after)
+    #     #   - IMPORTANT => IF WE'RE USING HF LLM.forward(... labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
+    #     input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
+
+    #     # Handle Truncation (if necessary)
+    #     input_ids, labels = input_ids[: self.tokenizer.model_max_length], labels[: self.tokenizer.model_max_length]
+
+    #     # === Handle "unimodal" (language-only) vs. "multimodal" ===
+    #     if "image" in self.examples[idx]:
+    #         image_path = Path(self.examples[idx]["image"])
+
+    #         # Set the <BOS> token's label to IGNORE_INDEX (since we're inserting the image patches right after)
+    #         labels[0] = IGNORE_INDEX
+
+    #         # Process Image --> get "pixel_values" (will either be a torch.Tensor OR a Dict[str,torch.Tensor])
+    #         pixel_values = self.image_transform(Image.open(self.image_dir / image_path).convert("RGB"))
+
+    #         # Assume that pixel_values is a Tensor: [C, H, W]
+    #         # We simulate 'image_sizes' as (height_in_patches, width_in_patches)
+
+    #         h, w = pixel_values.shape[-2:]  # pixel_values: (C, H, W)
+
+    #         # Divide by patch size to get (number of patches) -- patch size usually 32 for ConvNeXt
+    #         patch_size = 32
+    #         image_size = (h // patch_size, w // patch_size)
+
+    #         image_sizes = [torch.tensor(image_size)]
+    #         return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels, image_sizes=image_sizes)
+
+
+    #     else:
+    #         # No image --> return `pixel_values` = None; Collator will do the smart batch handling for us!
+    #         return dict(pixel_values=None, input_ids=input_ids, labels=labels)
+
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """
-        Unlike the *align* stage handling, for the *finetune* stage, we actually need to handle multiple "turns" of
-        dialog grounded in a single image.
-
-        To do this, we leverage the `prompt_builder_fn` which instantiates a PromptBuilder object. By calling the
-        methods for adding turns and getting a prompt, we ensure proper formatting and consistency for each example.
-
-        :param idx: Index to retrieve from the dataset.
-
-        :return: Dictionary of {"pixel_values": torch.Tensor, "input_ids": torch.Tensor, "labels": torch.Tensor}
-        """
         conversation = self.examples[idx]["conversations"]
 
-        # Create Prompt Builder --> add each message sequentially
+        #调试信息
+        print("example keys:", self.examples[idx].keys())
+
         prompt_builder, input_ids, labels = self.prompt_builder_fn(model_family="prismatic"), [], []
         for turn_idx, turn in enumerate(conversation):
-            # Get "effective" string added to prompt --> handle whitespace for tokenizer type!
             msg = prompt_builder.add_turn(turn["from"], turn["value"])
 
-            # Llama Tokenizer (Fast) adds extra character if a string ends in whitespace --> strip if non-empty!
             if isinstance(self.tokenizer, LlamaTokenizerFast):
                 msg = msg.rstrip()
-
-            # Phi-2 Tokenizer == CodeGenTokenizer (Fast) -- no special handling!
             elif isinstance(self.tokenizer, CodeGenTokenizerFast):
                 pass
-
             else:
                 raise ValueError(f"Tokenizer of type `{type(self.tokenizer)}` is not explicitly handled!")
 
-            # Tokenize Input IDs
             turn_input_ids = self.tokenizer(msg, add_special_tokens=turn_idx == 0).input_ids
-
-            # [CRITICAL] We do not want to take the loss for the "USER: <msg>" prompts =>> just the responses!
             turn_labels = (
                 [IGNORE_INDEX for _ in range(len(turn_input_ids))] if (turn_idx % 2) == 0 else list(turn_input_ids)
             )
 
-            # Add to Trackers
             input_ids.extend(turn_input_ids)
             labels.extend(turn_labels)
 
-        # Tensorize =>> Set the <BOS> token's label to IGNORE_INDEX (since we're inserting the image patches after)
-        #   - IMPORTANT => IF WE'RE USING HF LLM.forward(... labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
         input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
-
-        # Handle Truncation (if necessary)
         input_ids, labels = input_ids[: self.tokenizer.model_max_length], labels[: self.tokenizer.model_max_length]
 
-        # === Handle "unimodal" (language-only) vs. "multimodal" ===
         if "image" in self.examples[idx]:
             image_path = Path(self.examples[idx]["image"])
-
-            # Set the <BOS> token's label to IGNORE_INDEX (since we're inserting the image patches right after)
             labels[0] = IGNORE_INDEX
-
-            # Process Image --> get "pixel_values" (will either be a torch.Tensor OR a Dict[str,torch.Tensor])
             pixel_values = self.image_transform(Image.open(self.image_dir / image_path).convert("RGB"))
 
-            return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels)
+            #补充处理image_sizes
+            h, w = pixel_values.shape[-2:]  # [C, H, W]
+            patch_size = 32  # ConvNeXt常见设置
+            image_size = (h // patch_size, w // patch_size)
+            image_sizes = [torch.tensor(image_size)]
 
+            return dict(
+                pixel_values=pixel_values,
+                input_ids=input_ids,
+                labels=labels,
+                image_sizes=image_sizes,
+            )
         else:
-            # No image --> return `pixel_values` = None; Collator will do the smart batch handling for us!
-            return dict(pixel_values=None, input_ids=input_ids, labels=labels)
+            # 即使是text-only，也要返回image_sizes=None
+            return dict(
+                pixel_values=None,
+                input_ids=input_ids,
+                labels=labels,
+                image_sizes=None,
+            )
+   
 
     def get_modality_lengths(self) -> List[Tuple[bool, int]]:
         """Get a list of modalities (unimodal / text-only vs. multimodal) and length of conversations per example."""
